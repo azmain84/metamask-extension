@@ -43,46 +43,106 @@ function createScriptTasks ({ browserPlatforms, livereload }) {
     // dev tasks (live reload)
     dev: createTasksForBuildJsExtension({ taskPrefix: 'scripts:core:dev', devMode: true }),
     testDev: createTasksForBuildJsExtension({ taskPrefix: 'scripts:core:test-live', devMode: true, testing: true }),
-    // built for CI tests
-    test: createTasksForBuildJsExtension({ taskPrefix: 'scripts:core:test', testing: true }),
-    // production
-    prod: createTasksForBuildJsExtension({ taskPrefix: 'scripts:core:prod' }),
-  }
-  const deps = {
-    background: createTasksForBuildJsDeps({ filename: 'bg-libs', key: 'background' }),
-    ui: createTasksForBuildJsDeps({ filename: 'ui-libs', key: 'ui' }),
+    // // built for CI tests
+    // test: createTasksForBuildJsExtension({ taskPrefix: 'scripts:core:test', testing: true }),
+    // // production
+    // prod: createTasksForBuildJsExtension({ taskPrefix: 'scripts:core:prod' }),
   }
 
   // high level tasks
 
-  const prod = composeParallel(
-    deps.background,
-    deps.ui,
-    core.prod,
-  )
-
   const dev = core.dev
   const testDev = core.testDev
 
-  const test = composeParallel(
-    deps.background,
-    deps.ui,
-    core.test,
-  )
+
+  const prod = createTask(`scripts:prod`, composeParallel(
+    createTask(`scripts:factor:prod`, createBuildFactor()),
+    createTask(`scripts:contentscript:prod`, createBuildContentscriptTask()),
+  ))
+  const test = createTask(`scripts:test`, composeParallel(
+    createTask(`scripts:factor:test`, createBuildFactor({ test: true })),
+    createTask(`scripts:contentscript:test`, createBuildContentscriptTask({ test: true })),
+  ))
+  // for dev
+  createTask(`factor`, composeSeries('clean', createBuildFactor()))
+
 
   return { prod, dev, testDev, test }
 
 
-  function createTasksForBuildJsDeps ({ key, filename }) {
-    return createTask(`scripts:deps:${key}`, bundleTask({
-      label: filename,
-      filename: `${filename}.js`,
-      buildLib: true,
-      dependenciesToBundle: externalDependenciesMap[key],
-      devMode: false,
-    }))
-  }
+  function createBuildFactor (opts = {}) {
+    return function buildFactor () {
+      const bundler = browserify(['app/scripts/ui.js', 'app/scripts/background.js'], {
+        dedupe: false,
+      })
+        .transform('babelify')
+      // Transpile any dependencies using the object spread/rest operator
+      // because it is incompatible with `esprima`, which is used by `envify`
+      // See https://github.com/jquery/esprima/issues/1927
+        .transform('babelify', {
+          only: [
+            './**/node_modules/libp2p',
+          ],
+          global: true,
+          plugins: ['@babel/plugin-proposal-object-rest-spread'],
+        })
+        .transform('brfs')
+        .plugin('bify-package-factor')
 
+      // Inject variables into bundle
+      // + 1 sec
+      let environment
+      if (opts.devMode) {
+        environment = 'development'
+      } else if (opts.test) {
+        environment = 'testing'
+      } else if (process.env.CIRCLE_BRANCH === 'master') {
+        environment = 'production'
+      } else if (/^Version-v(\d+)[.](\d+)[.](\d+)/.test(process.env.CIRCLE_BRANCH)) {
+        environment = 'release-candidate'
+      } else if (process.env.CIRCLE_BRANCH === 'develop') {
+        environment = 'staging'
+      } else if (process.env.CIRCLE_PULL_REQUEST) {
+        environment = 'pull-request'
+      } else {
+        environment = 'other'
+      }
+
+      bundler.transform(envify({
+        METAMASK_DEBUG: 'METAMASK_DEBUG',
+        METAMASK_ENVIRONMENT: environment,
+        NODE_ENV: 'NODE_ENV',
+        IN_TEST: opts.test ? 'true' : false,
+        PUBNUB_SUB_KEY: 'PUBNUB_SUB_KEY',
+        PUBNUB_PUB_KEY: 'PUBNUB_PUB_KEY',
+      }), {
+        global: true,
+      })
+
+      let buildStream = bundler.bundle()
+        // buffer file contents
+        .pipe(buffer())
+        // +60
+        .pipe(terser({
+          mangle: {
+            reserved: [ 'MetamaskInpageProvider' ],
+          },
+        }))
+        // .pipe(through((file, _, cb) => {
+        //   file.contents = runTerser(file.contents.toString())
+        //   cb(null, file)
+        // }))
+
+      // write completed bundles
+      // +3
+      browserPlatforms.forEach((platform) => {
+        const dest = `./dist/${platform}`
+        buildStream = buildStream.pipe(gulp.dest(dest))
+      })
+
+      return buildStream
+    }
+  }
 
   function createTasksForBuildJsExtension ({ taskPrefix, devMode, testing }) {
     const standardBundles = [
@@ -99,7 +159,7 @@ function createScriptTasks ({ browserPlatforms, livereload }) {
     // inpage must be built before contentscript
     // because inpage bundle result is included inside contentscript
     const contentscriptSubtask = createTask(`${taskPrefix}:contentscript`,
-      createTaskForBuildJsExtensionContentscript({ devMode, testing })
+      createBuildContentscriptTask({ devMode, testing } = {})
     )
 
     // task for initiating livereload
@@ -136,7 +196,7 @@ function createScriptTasks ({ browserPlatforms, livereload }) {
     })
   }
 
-  function createTaskForBuildJsExtensionContentscript ({ devMode, testing }) {
+  function createBuildContentscriptTask ({ devMode, testing } = {}) {
     const inpage = 'inpage'
     const contentscript = 'contentscript'
     return composeSeries(
