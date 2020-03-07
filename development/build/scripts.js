@@ -109,12 +109,12 @@ function createScriptTasks ({ browserPlatforms, livereload }) {
       }
 
       bundler.transform(envify({
-        METAMASK_DEBUG: 'METAMASK_DEBUG',
+        METAMASK_DEBUG: opts.devMode,
         METAMASK_ENVIRONMENT: environment,
-        NODE_ENV: 'NODE_ENV',
+        NODE_ENV: opts.devMode ? 'development' : 'production',
         IN_TEST: opts.test ? 'true' : false,
-        PUBNUB_SUB_KEY: 'PUBNUB_SUB_KEY',
-        PUBNUB_PUB_KEY: 'PUBNUB_PUB_KEY',
+        PUBNUB_SUB_KEY: process.env.PUBNUB_SUB_KEY || '',
+        PUBNUB_PUB_KEY: process.env.PUBNUB_PUB_KEY || '',
       }), {
         global: true,
       })
